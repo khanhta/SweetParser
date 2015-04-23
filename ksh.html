@@ -11,13 +11,12 @@
  * 14-Apr-2015: Initialized. Inspired by http://scratch-lang.notim...ratch-lang.html 
  * 16-Apr-2015: variable resolution 
  * 17-Apr-2015: flow control: if-then-else-fi 
- * 20-Apr-2015: flow control: while-do-done 
- *  until-do-done 
+ * 20-Apr-2015: flow control: while-do-done, until-do-done 
  * 21-Apr-2015: flow control: for-do-done 
+ * 22-Apr-2015: flow control: refractor while-do and until-do, variable scope added, ++ -- fixed 
  */
  
- 
-/* START Util section */
+ /* START Util section */
 Function.prototype.method = function(name, func) {
     if (this.prototype[name]) {
         displayer.display("WARNING", "Can't augment " + typeof(this) + " with function" + name);
@@ -44,6 +43,15 @@ function Displayer() {
         this.getLatest = function() {
             return displayStack.pop();
         }
+        this.getLength = function() {
+            return displayStack.length;
+        };
+        this.toString = function() {
+            return displayStack.join(",");
+        };
+        this.resetStack = function() {
+            displayStack = [];
+        };
     }
     /* END DISPLAY seciont */
     /* START PARSER section */
@@ -53,13 +61,20 @@ function Lexer(text) {
     var words = text.split(/\s+/);
     var next = -1;
     this.nextWord = function() {
-        next++;
-        if (next >= words.length) return null;
-        return words[next];
+        if (next < words.length) {
+            next++;
+            return words[next];
+        } else {
+            return null;
+        }
     };
     this.moveBack = function(index) {
         if (typeof(index) == "number") {
-            next = index;
+            if (index == -1) {
+                next = words.length;
+            } else {
+                next = index;
+            }
         } else {
             next--;
         }
@@ -70,8 +85,9 @@ function Lexer(text) {
     this.splitWord = function(splitIndex, delimiter) {
         var currentWord = words[next];
         var curIndex = next + 1;
+        var tokens;
         if (splitIndex == -1) {
-            var tokens = currentWord.split(delimiter);
+            tokens = currentWord.split(delimiter);
             for (var i = 0; i < tokens.length; i++) {
                 if (tokens[i].length != 0) {
                     words.splice(curIndex++, 0, tokens[i]);
@@ -81,54 +97,96 @@ function Lexer(text) {
         } else {
             words[next] = currentWord.slice(0, splitIndex);
             var rest = currentWord.slice(splitIndex + delimiter);
+            tokens = [words[next], rest];
             if (rest.length != 0) {
                 words.splice(next + 1, 0, rest);
             }
         }
+        return tokens;
     };
     this.getTokens = function(startIndex, endIndex) {
         return words.slice(startIndex, endIndex).join(" ");
     };
 }
 
-function Parser(displayer) {
-    var keyword_dict = {};
+function getKeyWordDict() {
+    var keyWordDict = {};
+
+    function addKeyWord(newdict) {
+        for (var word in newdict) {
+            if (word in keyWordDict) {
+                displayer.display("INFO", "Existing keyword. Not add again.");
+            } else {
+                keyWordDict[word] = newdict[word];
+            }
+        }
+    };
+    addKeyWord(TERP_CONST["print_dict"]);
+    addKeyWord(TERP_CONST["math_dict"]);
+    addKeyWord(TERP_CONST["comment_words_dict"]);
+    addKeyWord(TERP_CONST["variable_dict"]);
+    addKeyWord(TERP_CONST["logic_exp_dict"]);
+    addKeyWord(TERP_CONST["control_dict"]);
+    addKeyWord(TERP_CONST["function_dict"]);
+    return keyWordDict;
+}
+
+function Action(terp, name, start, end) {
+    this.terp = terp;
+    this.name = name;
+    this.start = start;
+    this.end = end;
+}
+
+function Parser(displayer, new_keyWordDict) {
+    this.keyWordDict = new_keyWordDict;
+    this.variable = {};
     this.stack = [];
     this.localStack = [];
     this.lexer;
     this.displayer = displayer;
-
-    function addKeyWord(newdict) {
-        for (var word in newdict) {
-            if (word in keyword_dict) {
-                displayer.display("INFO", "Existing keyword. Not add again.");
-            } else {
-                keyword_dict[word] = newdict[word];
+    var ended = false;
+    this.initWithParentVar = function(parentVar) {
+        for (var word in parentVar) {
+            this.variable[word] = parentVar[word];
+        }
+    };
+    this.updateWithChildVar = function(childVar) {
+        for (var word in childVar) {
+            if (word in this.variable) {
+                this.variable[word] = childVar[word];
             }
         }
     };
-    this.init = function() {
-        addKeyWord(TERP_CONST["print_dict"]);
-        addKeyWord(TERP_CONST["math_dict"]);
-        addKeyWord(TERP_CONST["comment_words_dict"]);
-        addKeyWord(TERP_CONST["variable_dict"]);
-        addKeyWord(TERP_CONST["logic_exp_dict"]);
-        addKeyWord(TERP_CONST["control_dict"]);
+    this.break = function() {
+        ended = true;
+    };
+    this.continue = function() {
+        this.lexer.moveBack(-1);
+    };
+    this.isEnd = function() {
+        return ended;
     };
     this.define = function(name, val) {
         if (typeof(val) != "function") {
             name = "$" + name;
+            if (name in this.variable) {
+                displayer.display("INFO", "Variable " + name + " has already been defined! Old value: " + this.keyWordDict[name] + ", new value: " + val);
+            }
+            this.variable[name] = val;
+        } else {
+            if (name in this.keyWordDict) {
+                displayer.display("ERROR", "Function " + name + " has already been defined!");
+                throw "Duplicate function name";
+            }
+            this.keyWordDict[name] = val;
         }
-        if (name in keyword_dict) {
-            displayer.display("INFO", "Variable " + name + " has already been defined! Old value: " + keyword_dict[name] + ", new value: " + val);
-        }
-        keyword_dict[name] = val;
     };
     this.fetch = function(name) {
         var prefix = name.slice(0, 1);
         if ("$" == prefix) {
-            if (name in keyword_dict) {
-                var ret = keyword_dict[name];
+            if (name in this.variable) {
+                var ret = this.variable[name];
                 if (!isNaN(parseFloat(ret))) {
                     return parseFloat(ret);
                 } else {
@@ -146,20 +204,28 @@ function Parser(displayer) {
         this.lexer = new Lexer(text);
         var word;
         var num;
-        while (word = this.lexer.nextWord()) {
-            if (keyword_dict[word]) {
-                keyword_dict[word](this);
+        while ((word = this.lexer.nextWord()) && !ended) {
+            if (this.keyWordDict[word]) {
+                this.keyWordDict[word](this);
             } else if (num = parseFloat(word)) {
                 this.stack.push(num);
             } else if (word.search(/=/) > -1) { /*check if this is variable assignment */
                 this.lexer.moveBack();
-                keyword_dict["export"](this);
+                this.keyWordDict["export"](this);
             } else {
                 throw "Unknown token" + word;
             }
         }
         if (test_func) {
             test_func(test_name, this, expected);
+        }
+    };
+    this.splitTokens = function(splitIndex, delimiter) {
+        var tokens = this.lexer.splitWord(splitIndex, delimiter);
+        for (var i = 0; i < tokens.length; i++) {
+            if (num = parseFloat(tokens[i])) {
+                this.stack.push(num);
+            }
         }
     };
 }
@@ -179,7 +245,7 @@ function string_resolve(terp, delimiter, next_word) {
     var collector = "";
     var vars = next_word.split(/(\$[a-zA-Z0-9_]+)/);
     for (var i = 0; i < vars.length; i++) {
-        if (vars.length != 0) {
+        if (vars[i].length != 0) {
             collector += string_resolve(terp, delimiter, terp.fetch(vars[i]));
         }
     }
@@ -197,7 +263,7 @@ function string_word_func(terp, continuedDelimiter, midWord) {
             next_word = terp.lexer.nextWord();
             var delimiter = next_word.slice(0, 1);
             if (["\"", "'", "`"].indexOf(delimiter) < 0) {
-                delimiter = /[;\n]/; /* read till the end */
+                delimiter = /[;\n]/; /*read till the end*/
             } else {
                 delimiter = new RegExp(delimiter);
                 next_word = next_word.slice(1);
@@ -210,7 +276,7 @@ function string_word_func(terp, continuedDelimiter, midWord) {
                 next_word = next_word.slice(0, delimiterIndex);
                 collector += string_resolve(terp, delimiter, next_word);
                 done = true;
-            } else { /*analyze if next_word need to be resolved */
+            } else { /* analyze if next_word need to be resolved */
                 collector += string_resolve(terp, delimiter, next_word);
                 collector += " ";
             }
@@ -242,6 +308,22 @@ TERP_CONST["print_dict"] = {
         terp.displayer.display("OUTPUT", terp.stack.pop());
     }
 };
+
+function
+let (terp) {
+    /* assumption: space between '((' and expression, and expression and '))' i.e. (( expression ));  */
+    var next_word = terp.lexer.nextWord();
+    var delimiter = /([a-zA-Z0-9_$]+)/;
+    var tokens = next_word.split(delimiter);
+    terp.stack.push(tokens[1]);
+    terp.stack.push("((");
+    var curr = terp.fetch("$" + tokens[1]);
+    if (typeof(curr) != "number") {
+        terp.fetch(tokens[1]);
+    }
+    terp.stack.push(curr);
+    terp.splitTokens(-1, delimiter);
+}
 TERP_CONST["math_dict"] = { /* TODO: handle parenthenses, order multiplication/division higher than addition/subtraction */
     "+": function(terp) {
         terp.stack.push(parseFloat(terp.lexer.nextWord()));
@@ -272,80 +354,25 @@ TERP_CONST["math_dict"] = { /* TODO: handle parenthenses, order multiplication/d
         terp.stack.push(top_arg2 / top_arg1);
     },
     "++": function(terp) {
+        terp.displayer.display("INFO", "++ is not available in KSH. Make sure you use /usr/bin/ksh93");
         var top_arg1 = terp.stack.pop();
         terp.stack.push(parseInt(top_arg1) + 1);
     },
     "--": function(terp) {
+        terp.displayer.display("INFO", "-- is not available in KSH. Make sure you use /usr/bin/ksh93");
         var top_arg1 = terp.stack.pop();
         terp.stack.push(parseInt(top_arg1) - 1);
-    }
-};
-
-function compare(terp, operator, var1, var2) {
-    var1 = terp.fetch(var1);
-    var2 = terp.fetch(var2);
-    switch (operator) {
-        case "=":
-        case "-eq":
-            terp.stack.push(var1 == var2);
-            break;
-        case "!=":
-        case "-ne":
-            terp.stack.push(var1 != var2);
-            break;
-        case ">":
-        case "-gt":
-            terp.stack.push(var1 > var2);
-            break;
-        case "<":
-        case "-lt":
-            terp.stack.push(var1 < var2);
-            break;
-        default:
-            terp.displayer.display("ERROR", "Invalid operator " + operator);
-            throw "Invalid operator";
-            break;
-    }
-}
-
-function let (terp) { //inside trivial calculation, $ is optional 
-    /* assumption: space between '((' and expression, and expression and '))' i.e. (( expression ));  */
-    var next_word = terp.lexer.nextWord();
-    var delimiter = /([a-zA-Z0-9_$]+)/;
-    var tokens = next_word.split(delimiter);
-    terp.stack.push(tokens[1]);
-    terp.stack.push("((");
-    var curr = terp.fetch("$" + tokens[1]);
-    if (typeof(curr) != "number") {
-        terp.fetch(tokens[1]);
-    }
-    terp.stack.push(curr);
-    terp.lexer.splitWord(-1, delimiter);
-}
-TERP_CONST["logic_exp_dict"] = {
-    "[[": function doubleSquareBrackets(terp) {
-        var var1, operator, var2;
-        if ((var1 = terp.lexer.nextWord()) == null || (operator = terp.lexer.nextWord()) == null || (var2 = terp.lexer.nextWord()) == null) {
-            terp.displayer.display("ERROR", "Invalid logical expression. Expected format: var1 op var2.");
-            throw "Invalid logical expression";
-        } else {
-            compare(terp, operator, var1, var2);
-            var next_word = terp.lexer.nextWord();
-            if (next_word == "]]" || next_word == "]];") {
-                return;
-            }
-            if (next_word == "||") {
-                return terp.stack.getTop() || doubleSquareBrackets(terp);
-            }
-            if (next_word == "&&") {
-                return terp.stack.getTop() && doubleSquareBrackets(terp);
-            }
-            terp.displayer.display("ERROR", "Unexpected end of logical expression" + next_word);
-            throw "Unexpected end of logical expression";
-        }
     },
-    "test": function(terp) {},
-    "[": function(terp) {},
+    "+=": function(terp) {
+        var top_arg1 = terp.stack.pop();
+        var top_arg2 = terp.lexer.nextWord();
+        terp.stack.push(parseInt(top_arg1) + parseInt(top_arg2));
+    },
+    "-=": function(terp) {
+        var top_arg1 = terp.stack.pop();
+        var top_arg2 = terp.lexer.nextWord();
+        terp.stack.push(parseInt(top_arg1) - parseInt(top_arg2));
+    },
     "((": let,
     "))": function(terp) {
         var val = terp.stack.pop();
@@ -358,6 +385,76 @@ TERP_CONST["logic_exp_dict"] = {
         terp.define(var1, val);
     },
     "let": let
+};
+
+function compare(terp, operator, var1, var2) {
+    var1 = terp.fetch(var1);
+    var2 = terp.fetch(var2);
+    switch (operator) {
+        case "-eq":
+            if (isNaN(parseFloat(var1)) || isNaN(parseFloat(var2))) {
+                throw "Invalid comparison. -eq can only compare number. Got " + var1 + " " + var2;
+                break;
+            }
+        case "=":
+            terp.stack.push(var1 == var2);
+            break;
+        case "-ne":
+            if (isNaN(parseFloat(var1)) || isNaN(parseFloat(var2))) {
+                throw "Invalid comparison. -ne can only compare number. Got " + var1 + " " + var2;
+                break;
+            }
+        case "!=":
+            terp.stack.push(var1 != var2);
+            break;
+        case "-gt":
+            if (isNaN(parseFloat(var1)) || isNaN(parseFloat(var2))) {
+                throw "Invalid comparison. -gt can only compare number. Got " + var1 + " " + var2;
+                break;
+            }
+        case ">":
+            terp.stack.push(var1 > var2);
+            break;
+        case "-lt":
+            if (isNaN(parseFloat(var1)) || isNaN(parseFloat(var2))) {
+                throw "Invalid comparison. -lt can only compare number. Got " + var1 + " " + var2;
+                break;
+            }
+        case "<":
+            terp.stack.push(var1 < var2);
+            break;
+        default:
+            terp.displayer.display("ERROR", "Invalid operator " + operator);
+            throw "Invalid operator";
+            break;
+    }
+}
+
+function doubleSquareBrackets(terp) {
+    var var1, operator, var2;
+    if ((var1 = terp.lexer.nextWord()) == null || (operator = terp.lexer.nextWord()) == null || (var2 = terp.lexer.nextWord()) == null) {
+        terp.displayer.display("ERROR", "Invalid logical expression. Expected format: var1 op var2.");
+        throw "Invalid logical expression";
+    } else {
+        compare(terp, operator, var1, var2);
+        var next_word = terp.lexer.nextWord();
+        if (next_word == "]]" || next_word == "]];") {
+            return;
+        }
+        if (next_word == "||") {
+            return terp.stack.getTop() || doubleSquareBrackets(terp);
+        }
+        if (next_word == "&&") {
+            return terp.stack.getTop() && doubleSquareBrackets(terp);
+        }
+        terp.displayer.display("ERROR", "Unexpected end of logical expression" + next_word);
+        throw "Unexpected end of logical expression";
+    }
+}
+TERP_CONST["logic_exp_dict"] = {
+    "[[": doubleSquareBrackets,
+    "test": function(terp) {},
+    "[": function(terp) {}
 };
 TERP_CONST["variable_dict"] = {
     "export": function(terp) {
@@ -376,31 +473,16 @@ TERP_CONST["variable_dict"] = {
             var restOfVal = tokens[1].slice(delimiterIndex + 1);
             if (endDelimiterIndex > -1 && endDelimiterIndex < endStatementIndex) { /* semicolon is after closing quote -> split statement at semicolon */
                 restOfVal = tokens[1].slice(delimiterIndex + 1, endStatementIndex - delimiterIndex);
-                terp.lexer.splitWord(tokens[0].length + "=".length + endStatementIndex, ";".length);
+                terp.splitTokens(tokens[0].length + "=".length + endStatementIndex, ";".length);
             }
             string_word_func(terp, tokens[1].charAt(delimiterIndex), restOfVal);
             val += terp.stack.getTop();
         } else if (endStatementIndex > -1) {
             val = val.slice(0, endStatementIndex);
-            terp.lexer.splitWord(tokens[0].length + "=".length + endStatementIndex, ";".length);
+            terp.splitTokens(tokens[0].length + "=".length + endStatementIndex, ";".length);
         }
         terp.define(tokens[0], val);
     }
-};
-
-function done(terp) {
-    var startIndex;
-    while (tos = terp.stack.pop()) {
-        if (terp.stack.length == 0) {
-            terp.displayer.display("ERROR", "Unexpected 'done' found");
-            throw "Unexpected 'done' found";
-        }
-        if (typeof(tos.index) == "number") {
-            startIndex = tos.index;
-            break;
-        }
-    }
-    terp.lexer.moveBack(startIndex);
 };
 
 function iterate(terp) {
@@ -409,6 +491,60 @@ function iterate(terp) {
         list.push(next);
     }
     return list;
+}
+
+function getDoDoneStatements(terp) {
+    var startStatementIndex = terp.lexer.currentIndex();
+    if (terp.lexer.nextWord() == "do") {
+        startStatementIndex += 1;
+    }
+    var do_done_count = 1;
+    while (true) {
+        var next = terp.lexer.nextWord();
+        if (next == "do") {
+            do_done_count++;
+        } else if (next == "done") {
+            do_done_count--;
+        }
+        if (do_done_count == 0) {
+            break;
+        }
+    }
+    var endStatementIndex = terp.lexer.currentIndex();
+    return terp.lexer.getTokens(startStatementIndex + 1, endStatementIndex);
+}
+
+function conditionalLoop(terp, type) {
+    var openBracket = terp.lexer.nextWord();
+    var loopStartIndex = terp.lexer.currentIndex();
+    if (openBracket in terp.keyWordDict) {
+        terp.keyWordDict[openBracket](terp);
+    } else {
+        throw "Expect logical expression " + openBracket;
+    }
+    var condition = terp.lexer.getTokens(loopStartIndex, terp.lexer.currentIndex() + 1);
+    var doDoneStatements = getDoDoneStatements(terp);
+    var loopEndIndex = terp.lexer.currentIndex();
+    var stopCondition;
+    switch (type) {
+        case "WHILE":
+            stopCondition = true;
+            TERP_VAR.actionStack.push(new Action(terp, "WHILE", loopStartIndex, loopEndIndex));
+            break;
+        case "UNTIL":
+            stopCondition = false;
+            TERP_VAR.actionStack.push(new Action(terp, "UNTIL", loopStartIndex, loopEndIndex));
+            break;
+    }
+    var childTerp = new Parser(terp.displayer, terp.keyWordDict);
+    childTerp.initWithParentVar(terp.variable);
+    childTerp.run(condition);
+    while (childTerp.stack.pop() == stopCondition) {
+        childTerp.run(doDoneStatements);
+        childTerp.run(condition);
+    }
+    terp.updateWithChildVar(childTerp.variable);
+    TERP_VAR.actionStack.pop();
 }
 TERP_CONST["control_dict"] = {
     "if": function(terp) {
@@ -448,121 +584,81 @@ TERP_CONST["control_dict"] = {
         }
     },
     "while": function(terp) {
-        terp.stack.push({
-            "control": "WHILE",
-            "index": terp.lexer.currentIndex()
-        });
-        return;
+        conditionalLoop(terp, "WHILE");
     },
     "until": function(terp) {
-        terp.stack.push({
-            "control": "UNTIL",
-            "index": terp.lexer.currentIndex()
-        });
-        return;
+        conditionalLoop(terp, "UNTIL");
     },
-    "for": function(terp) { /*for foo in list ; do */
+    "for": function(terp) { /* for foo in list ; do */
         var counter = terp.lexer.nextWord();
         if (terp.lexer.nextWord() != "in") {
             throw "Invalid 'for var in list' syntax";
         }
         var iterateList = iterate(terp);
-        var startStatementIndex = terp.lexer.currentIndex();
-        if (terp.lexer.nextWord() == "do") {
-            startStatementIndex += 1;
-        }
-        var do_done_count = 1;
-        while (true) {
-            var next = terp.lexer.nextWord();
-            if (next == "do") {
-                do_done_count++;
-            } else if (next == "done") {
-                do_done_count--;
-            }
-            if (do_done_count == 0) {
-                break;
-            }
-        }
-        var endStatementIndex = terp.lexer.currentIndex();
-        var doStatements = terp.lexer.getTokens(startStatementIndex + 1, endStatementIndex);
-        var childTerp = new Parser(terp.displayer);
-        childTerp.init();
+        var loopStartIndex = terp.lexer.currentIndex();
+        var doStatements = getDoDoneStatements(terp);
+        var loopEndIndex = terp.lexer.currentIndex();
+        var childTerp = new Parser(terp.displayer, terp.keyWordDict);
+        childTerp.initWithParentVar(terp.keyWordDict);
+        TERP_VAR.actionStack.push(new Action(terp, "FOR", loopStartIndex, loopEndIndex));
         for (var i = 0; i < iterateList.length; i++) {
             childTerp.define(counter, iterateList[i]);
             childTerp.run(doStatements);
         }
-        return;
+        TERP_VAR.actionStack.pop();
     },
-    "do": function(terp) {
-        var decision = terp.stack.pop();
-        var loopInfo = terp.stack.getTop();
-        var loopType = loopInfo.control;
-        var loopStartIndex = loopInfo.index;
-        if (((loopType == "WHILE") && (decision == true)) || ((loopType == "UNTIL") && (decision == false))) {
-            terp.stack.push(loopInfo);
-            return;
-        } else {
-            var doneMatches = ["do"];
-            var doneCount = 1;
-            if (typeof(loopInfo.endAt) == "number") {
-                terp.lexer.moveBack(loopInfo.endAt);
-                return;
-            }
-            while ((next_word = terp.lexer.nextWord()) != null) {
-                if (next_word == "done") {
-                    if (doneCount == 1) {
-                        loopInfo["endAt"] = terp.lexer.currentIndex();
-                        return;
-                    } else {
-                        if (doneCount < 1) {
-                            throw "Invalid 'done' found. Please add " + doneMatches.join("/");
-                        }
-                        doneCount--;
-                    }
-                } else if (doneMatches.indexOf(next_word)) {
-                    doneCount++;
-                }
-            }
-        }
+    "done": function(terp) {
+        throw "Unexpected 'done' found";
     },
-    "done": done,
     "exit": function(terp) {
         terp.displayer.display("INFO", "Program exit now"); /* TODO: how to actually exit the shell? */
         throw "Exit";
+    },
+    "break": function(terp) {
+        if (tos = TERP_VAR.actionStack.pop()) {
+            terp.break();
+        } else {
+            throw "Invalid 'break'. No loop found";
+        }
+    },
+    "continue": function(terp) {
+        if (tos = TERP_VAR.actionStack.pop()) {
+            terp.continue();
+        } else {
+            throw "Invalid 'continue'. No loop found";
+        }
     }
 };
-TERP_CONST["function_dict"] = { /* TODO: this is not my code!!!! fix it later */
+TERP_CONST["function_dict"] = {
     "function": function(terp) {
-        var countBrackets = 1;
         var func_name = terp.lexer.nextWord();
-        var code = [];
-        do {
+        var countBrackets = 1;
+        var bracket = terp.lexer.nextWord();
+        var funcStartIndex = terp.lexer.currentIndex() + "{".length;
+        while (true) {
             var word = terp.lexer.nextWord();
             if (word == null) throw "Unexpected end of input";
             if (word == "}") {
                 countBrackets--;
                 if (countBrackets == 0) {
                     var finished = true;
-                    continue;
+                    break;
                 }
             } else if (word == "{") {
                 countBrackets++;
             }
-        } while (!finished);
+        }
+        var funcEndIndex = terp.lexer.currentIndex();
+        var code = terp.lexer.getTokens(funcStartIndex, funcEndIndex);
         terp.define(func_name, function(terp) {
-            var code_pointer = 0;
-            while (code_pointer < code.length) {
-                var word = code[code_pointer];
-                if (typeof(word) == "function") {
-                    word(terp);
-                } else {
-                    terp.stack.push(word);
-                }
-                code_pointer++;
-            }
+            var content = code;
+            var childTerp = new Parser(terp.displayer, terp.keyWordDict);
+            childTerp.initWithParentVar(terp.variable);
+            childTerp.run(content);
         });
     }
-}; /* END Define keyword and special tokens */ /* START Unit test case */
+};
+/ * END Define keyword and special tokens * / /* START Unit test case */
 function Test(displayer) {
     var numTests = 0;
     var passTests = 0;
@@ -580,18 +676,24 @@ function Test(displayer) {
     this.statistic = function() {
         displayer.display("OUTPUT", "Number of fail tests " + failTests + "/" + numTests);
     }
-    this.cases = {
+    this.cases = { /* need test case to catch exception hahaha */
         "test_equal_top_display_stack": function(test_name, terp, expected) {
             var testPass = true;
-            for (var i = 0; i < expected.length; i++) {
-                if ((tos = displayer.getLatest()) != expected[i]) {
-                    fail(test_name, expected[i], tos);
-                    testPass = false;
-                    break;
+            var displayRes = displayer.toString();
+            if (displayer.getLength() != expected.length) {
+                displayer.resetStack();
+                testPass = false;
+            } else {
+                for (var i = displayer.getLength() - 1; i > -1; i--) {
+                    if ((tos = displayer.getLatest()) != expected[i]) {
+                        testPass = false;
+                    }
                 }
             }
             if (testPass == true) {
                 pass(test_name);
+            } else {
+                fail(test_name, expected, displayRes);
             }
         },
         "test_equal_top_stack": function(test_name, terp, expected) {
@@ -606,10 +708,10 @@ function Test(displayer) {
 
 /********************************* MAIN ******************************************/
 TERP_VAR["displayer"] = new Displayer();
-TERP_VAR["parser"] = new Parser(TERP_VAR.displayer);
+TERP_VAR["keyWordDict"] = getKeyWordDict();
+TERP_VAR["parser"] = new Parser(TERP_VAR.displayer, TERP_VAR.keyWordDict);
 TERP_VAR["test"] = new Test(TERP_VAR.displayer);
-TERP_VAR.parser.init();
-/* TERP_VAR.parser.run("1 + 2 - 3 / 4 + 5 * 67 + 890", TERP_VAR.test.cases["test_equal_top_stack"], "No parathenses test", 1227.25); */
+TERP_VAR["actionStack"] = []; /* TERP_VAR.parser.run("1 + 2 - 3 / 4 + 5 * 67 + 890", TERP_VAR.test.cases["test_equal_top_stack"], "No parathenses test", 1227.25); */
 TERP_VAR.parser.run("1 + 2 - 3 + 4 + 5 - 67 + 890", TERP_VAR.test.cases["test_equal_top_stack"], "No multiply/division/parathenses test", 832);
 TERP_VAR.parser.run("echo \"Hello World\"", TERP_VAR.test.cases["test_equal_top_display_stack"], "Echo simple string test in double quote", ["Hello World"]);
 TERP_VAR.parser.run("echo 'Hello World'", TERP_VAR.test.cases["test_equal_top_display_stack"], "Echo simple string test in single quote", ["Hello World"]);
@@ -625,14 +727,21 @@ TERP_VAR.parser.run("a=\"ba a a ab\"; echo $a;", TERP_VAR.test.cases["test_equal
 TERP_VAR.parser.run("[[ 10 > 9 ]]", TERP_VAR.test.cases["test_equal_top_stack"], "Logical expression >", true);
 TERP_VAR.parser.run("[[ 10 < 9 ]]", TERP_VAR.test.cases["test_equal_top_stack"], "Logical expression <", false);
 TERP_VAR.parser.run("[[ 9 -eq 9 ]]", TERP_VAR.test.cases["test_equal_top_stack"], "Logical expression -ne", true);
+TERP_VAR.parser.run("[[ 9 = 9 ]]", TERP_VAR.test.cases["test_equal_top_stack"], "Logical expression =", true);
+TERP_VAR.parser.run("i='hello'; [[ 'hello' = $i ]]", TERP_VAR.test.cases["test_equal_top_stack"], "Logical expression = string", true);
 TERP_VAR.parser.run("[[ 9 -eq 9 && 'a' < 'b' ]]", TERP_VAR.test.cases["test_equal_top_stack"], "Logical expression &&", true);
 TERP_VAR.parser.run("[[ 9 -ne 9 || 'a' < 'b' ]]", TERP_VAR.test.cases["test_equal_top_stack"], "Logical expression ||", true);
-TERP_VAR.parser.run("[[ 9 -ne 9 || 'a' > 'b' ]]", TERP_VAR.test.cases["test_equal_top_stack"], "Logical expression || false", false); 
+TERP_VAR.parser.run("[[ 9 -ne 9 || 'a' > 'b' ]]", TERP_VAR.test.cases["test_equal_top_stack"], "Logical expression || false", false);
 TERP_VAR.parser.run("if [[ 1 = 1 ]]; then echo Huray; fi", TERP_VAR.test.cases["test_equal_top_display_stack"], "if-then-fi", ["Huray"]);
 TERP_VAR.parser.run("if [[ 1 = 1 ]]; then echo Huray; else echo Phew; fi", TERP_VAR.test.cases["test_equal_top_display_stack"], "if-then-else-fi", ["Huray"]);
-TERP_VAR.parser.run("if [[ 1 = 2 ]]; then echo Huray; else echo Phew; fi", TERP_VAR.test.cases["test_equal_top_display_stack"], "if-then-else-fi", ["Phew"]); 
-TERP_VAR.parser.run("count=3; while [[ $count -gt 0 ]]; do print \"$count\"; (( count-- )) ; done", TERP_VAR.test.cases["test_equal_top_display_stack"], "while-do-done", [1, 2, 3]);
-TERP_VAR.parser.run("until [[ $count -gt 4 ]]; do print $count; (( count++ )) ; done", TERP_VAR.test.cases["test_equal_top_display_stack"], "until-do-done", [4, 3, 2, 1, 0]);
-TERP_VAR.parser.run("for i in 1 2 3 4 5; do print $i ; done", TERP_VAR.test.cases["test_equal_top_display_stack"], "for-do-done", [5, 4, 3, 2, 1]);
+TERP_VAR.parser.run("if [[ 1 = 2 ]]; then echo Huray; else echo Phew; fi", TERP_VAR.test.cases["test_equal_top_display_stack"], "if-then-else-fi", ["Phew"]);
+TERP_VAR.parser.run("count=3; while [[ $count -gt 0 ]]; do print \"$count\"; (( count -= 1 )) ; done", TERP_VAR.test.cases["test_equal_top_display_stack"], "while-do-done", [3, 2, 1]);
+TERP_VAR.parser.run("count=3; while [[ $count -gt 0 ]]; do print \"$count\"; (( count -- )) ; break ; done", TERP_VAR.test.cases["test_equal_top_display_stack"], "while-do-done with break", [3]);
+TERP_VAR.parser.run("count=0; until [[ $count -gt 4 ]]; do print $count; (( count += 1 )) ; done", TERP_VAR.test.cases["test_equal_top_display_stack"], "until-do-done", [0, 1, 2, 3, 4]);
+TERP_VAR.parser.run("count=0; until [[ $count -gt 4 ]]; do print $count; (( count ++ )) ; if [[ $count -eq 3 ]]; then break ; fi ; done", TERP_VAR.test.cases["test_equal_top_display_stack"], "until-do-done with break", [0, 1, 2]);
+TERP_VAR.parser.run("for i in 1 2 3 4 5; do print $i ; done", TERP_VAR.test.cases["test_equal_top_display_stack"], "for-do-done", [1, 2, 3, 4, 5]);
+TERP_VAR.parser.run("for i in 1 2 3 4 5; do print $i ; if [[ $i -eq 3 ]]; then break ; fi ; done", TERP_VAR.test.cases["test_equal_top_display_stack"], "for-do-done with break", [1, 2, 3]);
+TERP_VAR.parser.run("for i in 1 2 3 4 5; do if [[ $i -eq 3 ]]; then continue ; fi ; print $i ; done", TERP_VAR.test.cases["test_equal_top_display_stack"], "for-do-done with continue", [1, 2, 4, 5]);
+TERP_VAR.parser.run("function foo { print a ; } foo");
 TERP_VAR.test.statistic();
 </script><html> 
